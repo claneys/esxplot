@@ -1,0 +1,118 @@
+#!/bin/bash -x
+
+function help(){
+    echo "USAGE: esxplot -c 'Group Cpu' -f esx.csv"
+    echo "  -c REGEXP           category regexp pattern"
+    echo "  -m METRIC_REGEXP    metric pattern to find, could be coupled with -v to precise on"
+    echo "                      which VM."
+    echo "  -v VM               pattern to search for, could be coupled with -m to filter on"
+    echo "                      metrics"
+    echo "  -f FILE             csv file to parse. Could be specified several times, which will"
+    echo "                      aggregate the metric for the files specified into one graph."
+    echo "  -s SIZE             size in format x,y (ie: 640,480) to apply to the output."
+    echo "                      Default to 1024,768"
+    echo "  -o OUTPUT_NAME      output file name without the extension."
+    echo "  -S [COLUMN|VM|METRIC|FILE] sort by VM or metric or ESX (aka file)"
+    echo "  -h                  help"
+}
+
+trap cleanup 1 2 3 6
+
+cleanup()
+{
+  rm -rf "$DFILE" "$HFILE" "$FILTER_H" "$DDIR"
+  exit
+}
+
+VM=""
+METRIC=""
+CATEGORY=""
+PLOT=""
+DDIR=$(mktemp -d)
+FILTER_H=$(mktemp)
+HFILE=$(mktemp)
+DFILE=$(mktemp)
+IFILE=""
+SIZE="1024,768"
+SORT="COLUMN"
+OUTPUT="output"
+INESX=
+INCAT=
+INVM=
+INMETRIC=
+
+while getopts ":hc:m:v:f:s:o:" ARG; do
+  case "$ARG" in 
+    c) CATEGORY="$(echo $OPTARG | sed -r 's:[/]:.:g')" ;;
+    m) METRIC="$(echo $OPTARG | sed -r 's:[/]:.:g')" ;;
+    v) VM="$(echo $OPTARG | sed -r 's:[/]:.:g')" ;;
+    f) IFILE="$IFILE $OPTARG" ;;
+    s) SIZE=$OPTARG ;;
+    o) OUTPUT=$OPTARG ;;
+    S) SORT=$OPTARG ;;
+    h) help ;;
+    :) echo "argument missing" ;;
+    \?) echo "Something is wrong" ;;
+  esac
+done
+
+shift "$((OPTIND-1))"
+
+function plot() {
+    PLOT="$1"
+    gnuplot -p -e 'set terminal pngcairo size '$SIZE';
+set grid;
+set xdata time;
+set timefmt "%m/%d/%Y %H:%M:%S";
+set datafile sep ",";
+set y2tics autofreq;
+set format x "%H:%M";
+set output "'$OUTPUT'.png";
+'"$PLOT"''
+}
+
+function extract_data() {
+  S=$1
+  INPUT=$2
+
+  while read -r m
+  do
+    n=$(echo $m | cut -d':' -f1)
+    h=$(echo $m | cut -d':' -f2- | tr -d '\\'| tr ' ' '_' | tr -d '"')
+    awk -F , '{print $1","$'$n'}' "$DFILE" > "$DDIR/$n" 
+    if test -z "$PLOT"
+    then
+      PLOT='plot "'$DDIR/$n'" using 1:2 with lines title "'$h'",'
+    else
+      PLOT=$PLOT'"'$DDIR/$n'" using 1:2 with lines title "'$h'",'
+    fi
+  done < $FILTER_H
+}
+
+function split_header_from_data() {
+    head -1 "$1" | sed 's/\,/\n/g' >> $HFILE
+    tail -n +2 "$1" >> $DFILE
+}
+
+function parse() {
+  cat $HFILE | grep -nE "$CATEGORY" | grep -nE "$VM" | grep -nE "$METRIC" | cut -d':' -f3- > $FILTER_H
+
+  while read -r h
+  do
+    INESX=$(echo $h | cut -d'\' -f3)
+    INCAT=$(echo $h | cut -d'\' -f4)
+    INMETRIC=$(echo $h | cut -d'\' -f5)
+    INVM=$(echo $h | cut -d'\' -f4 | cut -d'(' -f2)
+    extract_data $SORT 
+  done < $FILTER_H
+}
+
+for f in $IFILE
+do
+  split_header_from_data $f
+done
+
+plot $PLOT
+
+cleanup
+
